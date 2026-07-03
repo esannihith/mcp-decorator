@@ -44,11 +44,15 @@ TOOL_OVERRIDES: dict[str, ToolTransformConfig] = {
             "summary of the thread is needed."
         ),
     ),
+    # Also renamed (exposed as slack_post_message): demonstrates that a vendor
+    # tool can be surfaced under our own name while the vendor still does the
+    # work — the transform maps calls back to conversations_add_message.
     "conversations_add_message": ToolTransformConfig(
+        name="post_message",
         description=(
-            "Post a message to a channel or thread. The vendor server keeps "
-            "posting disabled unless explicitly enabled at its side; expect an "
-            "error if it is not."
+            "Post a message to a channel, or reply to a thread by passing "
+            "thread_ts. The vendor server keeps posting disabled unless "
+            "explicitly enabled at its side; expect an error if it is not."
         ),
     ),
 }
@@ -61,5 +65,8 @@ COMPOSITE_TOOLS: set[str] = {
 
 
 def allowed_tools() -> set[str]:
-    """Every tool name the wrapper exposes, post-namespacing."""
-    return {f"{NAMESPACE}_{name}" for name in TOOL_OVERRIDES} | COMPOSITE_TOOLS
+    """Every tool name the wrapper exposes, post-rename and post-namespacing."""
+    return {
+        f"{NAMESPACE}_{cfg.name or vendor_name}"
+        for vendor_name, cfg in TOOL_OVERRIDES.items()
+    } | COMPOSITE_TOOLS

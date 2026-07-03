@@ -1,13 +1,13 @@
-# slack-mcp-wrapper
+# mcp-decorator
 
+[![CI](https://github.com/esannihith/mcp-decorator/actions/workflows/ci.yml/badge.svg)](https://github.com/esannihith/mcp-decorator/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![FastMCP 3.x](https://img.shields.io/badge/FastMCP-3.x-green)](https://gofastmcp.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](#license)
-[![Tests](https://img.shields.io/badge/tests-9%20passing-brightgreen)](#testing)
 
 **Wrap a vendor's MCP server. Forward what works. Add what's missing.**
 
-This repo is a working reference implementation of the *MCP wrapper pattern* — an MCP server that sits in front of another vendor-provided MCP server, forwards a curated subset of its tools unchanged, and adds new composite tools the vendor can't offer. It is demonstrated and live-tested against a Slack MCP server, but the pattern applies to any vendor server (Jira, GitHub, Notion, ...).
+This repo is a working reference implementation of the *MCP decorator pattern* — an MCP server that sits in front of another vendor-provided MCP server, forwards a curated subset of its tools unchanged, and adds new composite tools the vendor can't offer. The reference implementation (the `slack_mcp_wrapper` package) is demonstrated and live-tested against a Slack MCP server, but the pattern applies to any vendor server (Jira, GitHub, Notion, ...).
 
 ---
 
@@ -53,7 +53,7 @@ Three rules keep a wrapper honest:
 
 The pattern above, implemented with [FastMCP 3.x](https://gofastmcp.com/) and **live-verified end to end** against a real Slack workspace through [`korotovsky/slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server):
 
-- ✅ Passthrough with curated descriptions (4 vendor tools, allowlisted, `slack_` namespaced)
+- ✅ Passthrough with curated descriptions (4 vendor tools, allowlisted, `slack_` namespaced — one exposed under our own name while the vendor does the work)
 - ✅ A composite tool combining a vendor call with local computation (`slack_channel_health_report`)
 - ✅ A composite tool using **MCP sampling** — the connected client's own LLM does the summarization (`slack_thread_digest`), with graceful degradation for clients that don't support sampling
 - ✅ Vendor contract survival: the vendor's real tool set differs from its own README and its payloads turned out to be CSV, not JSON — the allowlist and the isolated parser absorbed both discoveries without touching tool code
@@ -67,7 +67,7 @@ flowchart TB
     Vendor["Vendor Slack MCP server<br/>(korotovsky/slack-mcp-server)"]
     SlackAPI["Slack Web API"]
 
-    subgraph Wrapper["slack-mcp-wrapper (FastMCP 3.x)"]
+    subgraph Wrapper["mcp-decorator (FastMCP 3.x)"]
         Proxy["Proxy provider<br/>sources tools from the vendor server"]
         Transforms["Transforms<br/>slack_ namespace · description overrides · allowlist"]
         Local["Composite tools<br/>slack_channel_health_report · slack_thread_digest"]
@@ -97,7 +97,9 @@ Key properties, all verified live:
 | `slack_channels_list` | List workspace channels; resolves names → channel IDs |
 | `slack_conversations_history` | Recent top-level messages of a channel |
 | `slack_conversations_replies` | Full message thread by `channel_id` + `thread_ts` |
-| `slack_conversations_add_message` | Post a message or thread reply (vendor keeps this disabled unless `SLACK_MCP_ADD_MESSAGE_TOOL` is set) |
+| `slack_post_message` | Post a message or thread reply (vendor keeps this disabled unless `SLACK_MCP_ADD_MESSAGE_TOOL` is set) |
+
+`slack_post_message` also demonstrates **renaming**: it is the vendor's `conversations_add_message` surfaced under our own name — the transform maps calls back, the vendor still does the work (`ToolTransformConfig(name=...)` in `overrides.py`).
 
 ### Composite (added by this wrapper)
 
@@ -165,7 +167,7 @@ The Slack token is **not** wrapper configuration — it belongs to the vendor pr
 python -m pytest tests/ -q
 ```
 
-Covers the health-report metric math (ties, single poster, malformed timestamps) and the vendor CSV/JSON payload parsing, using payload samples captured from the live vendor.
+Two layers, 15 tests: unit tests for the health-report metric math (ties, single poster, malformed timestamps) and the vendor CSV/JSON payload parsing (samples captured from the live vendor); plus wrapper end-to-end tests that connect a FastMCP client to the assembled server **in memory** against a fake vendor — tool surface, rename routing, allowlist blocking, composite tools, and both sampling paths. The same suite runs in CI on every push.
 
 **Live verification** (what "works" means here): with vendor + wrapper running, connect [MCP Inspector](https://github.com/modelcontextprotocol/inspector) or an IDE and confirm `tools/list` shows exactly the 6 tools, then exercise each `tools/call` against a real channel and thread. Inspector supports sampling, so `slack_thread_digest` runs end to end. This full pass — including posting into a thread and both digest paths — has been executed against a real workspace.
 
