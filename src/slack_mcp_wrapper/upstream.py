@@ -7,6 +7,8 @@ upstream (e.g. to Slack's official mcp.slack.com server) touches only .env
 and the allowlist in overrides.py.
 """
 
+import csv
+import io
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -55,6 +57,57 @@ class Vendor:
         """One vendor tool call by *raw* vendor tool name (no namespace)."""
         async with self.client() as client:
             return await client.call_tool(name, args)
+
+
+# Column mapping observed live against korotovsky v1.3.0, whose message tools
+# return CSV text (header: MsgID,UserID,UserName,RealName,Channel,ThreadTs,
+# Text,Time,...). MsgID is the Slack message timestamp.
+_CSV_MESSAGE_COLUMNS = {"MsgID", "UserID", "Text"}
+
+
+def _messages_from_csv(text: str) -> list[dict[str, Any]] | None:
+    """Parse the vendor's CSV message payload into Slack-shaped dicts.
+
+    Returns None when the text isn't recognizably that CSV, so callers can
+    fall through to other formats.
+    """
+    rows = list(csv.DictReader(io.StringIO(text)))
+    if not rows or not _CSV_MESSAGE_COLUMNS.issubset(rows[0].keys()):
+        return None
+    return [
+        {
+            "ts": row.get("MsgID", ""),
+            "user": row.get("UserName") or row.get("UserID") or "",
+            "text": row.get("Text", ""),
+            "thread_ts": row.get("ThreadTs", ""),
+        }
+        for row in rows
+    ]
+
+
+def extract_messages(result: CallToolResult) -> list[dict[str, Any]]:
+    """Normalize a vendor message-tool result to a list of message dicts
+    with Slack-style keys (``ts``, ``user``, ``text``)."""
+    return messages_from_payload(extract_payload(result))
+
+
+def messages_from_payload(payload: Any) -> list[dict[str, Any]]:
+    """Message list from any payload format seen across vendors: korotovsky's
+    CSV text, a bare JSON list, or a Slack-API-shaped {"messages": [...]}
+    object. Anything else is a contract break worth surfacing.
+    """
+    if isinstance(payload, str):
+        messages = _messages_from_csv(payload)
+        if messages is not None:
+            return messages
+    if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
+        return payload["messages"]
+    if isinstance(payload, list):
+        return payload
+    raise ToolError(
+        "Unexpected message payload from the vendor server; "
+        f"got {type(payload).__name__}, expected CSV text or a message list."
+    )
 
 
 def extract_payload(result: CallToolResult) -> Any:

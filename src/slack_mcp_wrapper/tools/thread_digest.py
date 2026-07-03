@@ -14,8 +14,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
-from slack_mcp_wrapper.tools.health_report import extract_messages
-from slack_mcp_wrapper.upstream import Vendor, extract_payload
+from slack_mcp_wrapper.upstream import Vendor, extract_messages
 
 # Keeps the sampling prompt bounded on very long threads; the tail of a thread
 # carries the resolution, so we trim from the front.
@@ -54,7 +53,7 @@ def register(mcp: FastMCP, vendor: Vendor) -> None:
             "conversations_replies",
             {"channel_id": channel_id, "thread_ts": thread_ts},
         )
-        messages = extract_messages(extract_payload(result))
+        messages = extract_messages(result)
         transcript = build_transcript(messages)
 
         if not transcript:

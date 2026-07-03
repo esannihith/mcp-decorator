@@ -1,9 +1,10 @@
-"""Unit tests for the pure metric computation behind slack_channel_health_report."""
+"""Unit tests for the pure metric computation and vendor payload parsing."""
 
 import pytest
 from fastmcp.exceptions import ToolError
 
-from slack_mcp_wrapper.tools.health_report import compute_channel_metrics, extract_messages
+from slack_mcp_wrapper.tools.health_report import compute_channel_metrics
+from slack_mcp_wrapper.upstream import messages_from_payload
 
 
 def msg(user: str | None, ts: float, text: str = "hi") -> dict:
@@ -56,12 +57,41 @@ def test_authorless_messages_count_for_volume_not_ranking():
     assert report["messages_per_user"] == {"alice": 1}
 
 
-def test_extract_messages_accepts_slack_shape_and_bare_list():
+def test_messages_from_payload_accepts_slack_shape_and_bare_list():
     messages = [msg("alice", 1000.0)]
-    assert extract_messages({"messages": messages, "ok": True}) == messages
-    assert extract_messages(messages) == messages
+    assert messages_from_payload({"messages": messages, "ok": True}) == messages
+    assert messages_from_payload(messages) == messages
 
 
-def test_extract_messages_rejects_garbage():
+# Header and row shape as returned live by korotovsky v1.3.0.
+VENDOR_CSV = (
+    "MsgID,UserID,UserName,RealName,Channel,ThreadTs,Text,Time,Permalink,"
+    "Reactions,BotName,FileCount,AttachmentIDs,HasMedia,Cursor\n"
+    "1783104269.645549,U0BEM157DB9,demo_app,Demo App,C0BEWGH5K5F,,"
+    "Kicking off the review.,2026-07-03T18:44:29Z,,,Demo App,0,,false,\n"
+    '1783103660.831099,U0BENBLGU11,esanni04,e sanni,C0BEWGH5K5F,,"Hi, Demo App",'
+    "2026-07-03T18:34:20Z,,,,0,,false,\n"
+)
+
+
+def test_messages_from_payload_parses_vendor_csv():
+    messages = messages_from_payload(VENDOR_CSV)
+    assert len(messages) == 2
+    assert messages[0] == {
+        "ts": "1783104269.645549",
+        "user": "demo_app",
+        "text": "Kicking off the review.",
+        "thread_ts": "",
+    }
+    # Quoted field with a comma survives CSV parsing.
+    assert messages[1]["text"] == "Hi, Demo App"
+    # And the metrics pipeline accepts the normalized shape.
+    report = compute_channel_metrics(messages)
+    assert report["participant_count"] == 2
+
+
+def test_messages_from_payload_rejects_garbage():
     with pytest.raises(ToolError):
-        extract_messages("not a message list")
+        messages_from_payload("not,a,message\nlist,of,any,kind")
+    with pytest.raises(ToolError):
+        messages_from_payload(42)

@@ -6,7 +6,7 @@ This is **not** a gateway or aggregator. It doesn't route between multiple diffe
 
 Built on [FastMCP 3.x](https://gofastmcp.com/), whose provider/transform architecture does the proxying natively — this project contains **no hand-written tool registry or call dispatcher**.
 
-> **Status:** implemented and verified against an in-memory stand-in vendor (wiring, transforms, allowlist, both composite tools, sampling + degraded path). Live verification against a real Slack workspace is pending — follow [Testing](#testing) with the vendor server running.
+> **Status:** implemented and **live-verified end to end** against a real Slack workspace: all passthrough tools (including posting into a thread), both composite tools, and the sampling + degraded digest paths. Unit tests cover the metric math and the vendor's CSV payload format.
 
 ## Why this exists
 
@@ -75,7 +75,9 @@ Tool names below are the vendor's real tool names with the `slack_` namespace pr
 | `slack_conversations_replies` | Vendor | Also used internally by `slack_thread_digest` |
 | `slack_conversations_add_message` | Vendor | Posting is disabled by default in the vendor server unless explicitly enabled |
 
-Vendor tools outside the allowlist (user groups, saved items, unread tracking, etc.) are hidden, not forwarded.
+Vendor tools outside the allowlist (user groups, join/leave, mark-read, user search, etc.) are hidden, not forwarded. Live testing showed the vendor's actual tool set differs from its own README (it varies by token type) — which is exactly why the allowlist pins names instead of forwarding whatever appears.
+
+> **Vendor payload format:** korotovsky v1.3.0 returns message data as **CSV text**, not JSON (`MsgID,UserID,UserName,...,Text,...` — `MsgID` is the Slack timestamp). The composite tools parse this in `upstream.py` (`messages_from_payload`), which also accepts JSON shapes for other upstreams.
 
 ### Composite tools (new capabilities added by this wrapper)
 
@@ -117,14 +119,17 @@ Those prerequisites (published app + admin approval + OAuth client) are why loca
 
 - Python 3.11+
 - A Slack workspace you control, with a bot token (`xoxb-...`) and basic scopes (`channels:history`, `channels:read`, `users:read`)
-- [`korotovsky/slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server) available to run locally (Go, or its released binaries/Docker image)
+- Node.js (the vendor server ships as an npm package wrapping its Go binary — no Go toolchain needed)
 - An MCP client that supports **sampling** for `slack_thread_digest` (MCP Inspector does; the other tools work regardless)
+
+The bot token needs these **Bot Token Scopes** (the vendor lists all conversation types at boot, so the read scopes are all required): `channels:read`, `channels:history`, `groups:read`, `im:read`, `mpim:read`, `users:read`, plus `chat:write` if posting is enabled. Reinstall the app after adding scopes, and `/invite` the bot to the channels it should read.
 
 ### 1. Run the vendor Slack MCP server
 
-```bash
-export SLACK_MCP_XOXB_TOKEN=xoxb-your-bot-token
-slack-mcp-server --transport sse   # serves on 127.0.0.1:13080 by default
+```powershell
+$env:SLACK_MCP_XOXB_TOKEN = "xoxb-your-bot-token"
+$env:SLACK_MCP_ADD_MESSAGE_TOOL = "true"   # optional: enables posting
+npx -y slack-mcp-server@latest --transport sse   # serves on 127.0.0.1:13080/sse
 ```
 
 ### 2. Configure the wrapper

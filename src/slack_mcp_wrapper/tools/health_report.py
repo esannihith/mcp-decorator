@@ -12,9 +12,8 @@ from collections import Counter
 from typing import Any
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import ToolError
 
-from slack_mcp_wrapper.upstream import Vendor, extract_payload
+from slack_mcp_wrapper.upstream import Vendor, extract_messages
 
 
 def compute_channel_metrics(messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -48,22 +47,6 @@ def compute_channel_metrics(messages: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def extract_messages(payload: Any) -> list[dict[str, Any]]:
-    """Normalize a vendor conversations_history payload to a message list.
-
-    Accepts either a bare list of messages or a Slack-API-shaped object with
-    a ``messages`` key; anything else is a contract break worth surfacing.
-    """
-    if isinstance(payload, dict) and isinstance(payload.get("messages"), list):
-        return payload["messages"]
-    if isinstance(payload, list):
-        return payload
-    raise ToolError(
-        "Unexpected conversations_history payload from the vendor server; "
-        f"got {type(payload).__name__}, expected a message list."
-    )
-
-
 def register(mcp: FastMCP, vendor: Vendor) -> None:
     @mcp.tool
     async def slack_channel_health_report(channel_id: str, limit: str = "100") -> dict[str, Any]:
@@ -76,5 +59,5 @@ def register(mcp: FastMCP, vendor: Vendor) -> None:
             "conversations_history",
             {"channel_id": channel_id, "limit": limit},
         )
-        messages = extract_messages(extract_payload(result))
+        messages = extract_messages(result)
         return {"channel_id": channel_id, **compute_channel_metrics(messages)}
