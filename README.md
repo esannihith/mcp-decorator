@@ -4,124 +4,148 @@ An MCP server that wraps an existing Slack MCP server and adds custom orchestrat
 
 This is **not** a gateway or aggregator. It doesn't route between multiple different backends or load-balance replicas. It wraps exactly one upstream MCP server and augments it — architecturally, this is the Decorator pattern applied to MCP: forward what you don't need to change, add new behavior where you do.
 
-> **Status:** work in progress. See [Implementation status](#implementation-status) for what's built vs. planned.
+Built on [FastMCP 3.x](https://gofastmcp.com/), whose provider/transform architecture does the proxying natively — this project contains **no hand-written tool registry or call dispatcher**.
+
+> **Status:** work in progress. Built in phases; each phase is a commit checkpoint.
 
 ## Why this exists
 
 Vendor-provided MCP servers (Slack, Jira, GitHub, etc.) expose a fixed set of tools that map roughly 1:1 to their REST API. They're useful, but two things they can't do on their own:
 
-- **Combine their own tools into something new.** Slack's API has no "give me a channel health report" endpoint — it has separate endpoints for message history and member lists. Nobody upstream can build the combination for you.
-- **Call out to systems the vendor doesn't know exist.** Slack's API can't summarize a thread using an LLM, because that's not a Slack capability — it's yours to add.
+- **Combine their own tools into something new.** Slack's API has no "give me a channel health report" endpoint — it has separate endpoints for history, search, and channel listing. Nobody upstream can build the combination for you.
+- **Use the caller's intelligence.** Slack's API can't summarize a thread, because that requires an LLM — and the best-placed LLM is the one already driving the conversation. MCP has a primitive for exactly this: **sampling**, where the server asks the connected client's own model to generate text.
 
-This wrapper sits between an AI client and a vendor Slack MCP server, forwards the tools that don't need changing, and adds new tools that do one or both of the above.
+This wrapper sits between an AI client and a vendor Slack MCP server, forwards the tools that don't need changing, and adds composite tools that do one or both of the above.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    Client["AI client<br/>(Claude Desktop, Cursor, etc.)"]
-    Wrapper["slack-mcp-wrapper<br/>(this project)"]
+    Client["AI client + its LLM<br/>(Claude Desktop, Cursor, etc.)"]
     Vendor["Vendor Slack MCP server<br/>(korotovsky/slack-mcp-server)"]
     SlackAPI["Slack Web API"]
 
-    subgraph Wrapper_internals["Inside the wrapper"]
-        Registry["Tool registry<br/>merges vendor + local tool lists"]
-        Dispatch["Call dispatcher<br/>routes tools/call by name"]
-        Local["Local composite tools<br/>(health report, thread digest)"]
-        LLM["Anthropic API<br/>(for summarization)"]
+    subgraph Wrapper["slack-mcp-wrapper (FastMCP 3.x)"]
+        Proxy["Proxy provider<br/>sources tools from the vendor server"]
+        Transforms["Transforms<br/>slack_ namespace · description overrides · allowlist"]
+        Local["Local composite tools<br/>slack_channel_health_report · slack_thread_digest"]
     end
 
     Client -- "MCP: initialize, tools/list, tools/call" --> Wrapper
-    Wrapper --> Registry
-    Wrapper --> Dispatch
-    Dispatch -- "vendor tool call" --> Vendor
-    Dispatch -- "custom tool call" --> Local
-    Local -- "HTTP request" --> LLM
+    Wrapper -- "MCP sampling: 'summarize this thread'" --> Client
+    Proxy --> Transforms
+    Proxy -- "MCP client session" --> Vendor
+    Local -- "internal MCP calls" --> Vendor
     Vendor -- "Slack Web API calls" --> SlackAPI
 ```
 
-The wrapper plays two roles at once:
+The wrapper plays three roles at once:
 
-- **To the AI client, it is an MCP server.** The client only ever configures one connection — to this wrapper — and never talks to the vendor server or Slack directly.
-- **To the vendor Slack MCP server, it is an MCP client.** It opens its own MCP session to the vendor server, the same way any AI client would, and calls `tools/list` / `tools/call` on it internally.
+- **To the AI client, it is an MCP server.** The client configures one connection — to this wrapper — and never talks to the vendor server or Slack directly.
+- **To the vendor Slack MCP server, it is an MCP client.** FastMCP's proxy provider opens its own MCP session to the vendor, and the composite tools reuse the same connection settings for their internal calls.
+- **To the client's LLM, it is a sampling requester.** `slack_thread_digest` sends the thread text back to the connected client via MCP `sampling/createMessage` and lets the *client's* model write the summary. The wrapper holds no LLM API key and pays for no inference.
+
+### How FastMCP 3.x replaces the hand-rolled design
+
+An earlier design for this project planned a custom `registry.py` (merge vendor + local tool lists) and `dispatch.py` (route `tools/call` by name). FastMCP 3.0's architecture makes both redundant:
+
+| Concern | FastMCP 3.x primitive |
+|---|---|
+| Source tools from the vendor server | **Proxy provider** (`create_proxy` / provider backed by an MCP client) |
+| Prefix vendor tools as `slack_*` | **`Namespace` transform** |
+| Rewrite tool descriptions without touching behavior | **`ToolTransform`** |
+| Hide vendor tools we don't want to forward | **Visibility controls** (`enable`/`disable` allowlist) |
+| Add new composite tools | Plain `@mcp.tool` functions on the same server |
+| Merge + route everything | The FastMCP component pipeline, automatically |
 
 ### Why the vendor server runs as a standalone process, not a subprocess
 
-The wrapper connects to the vendor Slack MCP server over network transport (SSE/streamable HTTP) rather than spawning it as a stdio subprocess, even though both run on localhost during development. This keeps the client code identical whether the vendor server is running next to the wrapper or is Slack's actual official remote server (`mcp.slack.com`) — swapping the vendor endpoint later is a config change, not a rewrite.
+The wrapper connects to the vendor Slack MCP server over network transport rather than spawning it as a stdio subprocess, even though both run on localhost during development. This keeps the wrapper identical whether the upstream is the local vendor process or Slack's official remote server — swapping the upstream is a config change, not a rewrite.
 
 ## Tools
 
-### Passthrough tools (forwarded from the vendor, unchanged behavior)
+### Passthrough tools (forwarded from the vendor, behavior untouched)
+
+Tool names below are the vendor's real tool names with the `slack_` namespace prefix applied by the wrapper. The exact set is pinned by an allowlist in `overrides.py` and verified against the live vendor at startup of each phase.
 
 | Tool | Source | Notes |
 |---|---|---|
-| `slack__list_channels` | Vendor | Description may be tightened for clearer model use; behavior untouched |
-| `slack__post_message` | Vendor | Disabled by default in the vendor server unless explicitly enabled |
-| `slack__conversations_history` | Vendor | Used internally by composite tools below |
-| `slack__conversations_replies` | Vendor | Used internally by `slack_thread_digest` |
+| `slack_channels_list` | Vendor | Description tightened for clearer model use |
+| `slack_conversations_history` | Vendor | Also used internally by `slack_channel_health_report` |
+| `slack_conversations_replies` | Vendor | Also used internally by `slack_thread_digest` |
+| `slack_conversations_add_message` | Vendor | Posting is disabled by default in the vendor server unless explicitly enabled |
+
+Vendor tools outside the allowlist (user groups, saved items, unread tracking, etc.) are hidden, not forwarded.
 
 ### Composite tools (new capabilities added by this wrapper)
 
 **`slack_channel_health_report`**
-Combines the vendor's message history and member list tools into a single report: messages per member, average response gap, least active participants. Pure orchestration — no external HTTP call, just two vendor tool calls combined and computed locally.
+Pulls a channel's recent history via the vendor's `conversations_history` tool and computes activity metrics locally: messages per participant, average response gap, most/least active posters. Pure orchestration — one vendor call plus local computation. (The vendor exposes no member-list tool, so metrics are derived from posting activity, not channel membership.)
 
 **`slack_thread_digest`**
-Pulls a thread's full text via the vendor's `conversations_replies` tool, then makes one HTTP call to the Anthropic API to summarize it, and returns a short digest. This is a capability the vendor's API has no equivalent for.
-
-### Roadmap tools (not yet built)
-
-**`slack_triage_and_notify`** — on hold. Would extract action items from a thread via an LLM call and post them to a second external system (e.g. Notion). Deferred to keep the current scope to a single vendor with no second external write-target dependency.
+Pulls a thread's full text via the vendor's `conversations_replies` tool, then requests a summary **from the connected client's own LLM via MCP sampling** and returns a short digest. No server-side API key, no server-side inference cost. If the connected client doesn't support sampling, the tool degrades gracefully: it returns the collected thread text with a note so the client's model can summarize it directly.
 
 ## Tool description overrides
 
-Tool descriptions forwarded from the vendor are not always passed through verbatim. Descriptions may be rewritten to be more decision-relevant for a model choosing between tools (what it returns, when to prefer it over a similar tool). The rule followed throughout: **override the description, never the behavior.** If a description doesn't match what the underlying vendor call actually does, that's treated as a bug.
+Tool descriptions forwarded from the vendor are not always passed through verbatim. Descriptions may be rewritten (via FastMCP's `ToolTransform`) to be more decision-relevant for a model choosing between tools — what it returns, when to prefer it over a similar tool. The rule followed throughout: **override the description, never the behavior.** If a description doesn't match what the underlying vendor call actually does, that's treated as a bug.
 
 ## Auth model
 
-Credentials never reach the AI client or the model — they are injected server-side by the wrapper before forwarding a call.
+Slack credentials never reach the AI client, the model, or even this wrapper — they live in the **vendor server's** environment. The wrapper itself holds no secrets except an optional bearer key for its vendor connection:
 
-Current scope uses a **single service-account bot token**: one Slack bot token, held in an environment variable, used for every call regardless of which client is connected. This is simple and adequate for a single-workspace demo, but does not attribute actions to individual end users.
+- **Slack token** (`xoxb-...`): held by the vendor server process.
+- **LLM inference**: performed by the connected client's own model via MCP sampling — the wrapper has no Anthropic/OpenAI key at all.
+- **Vendor bearer key** (optional): if the vendor server is started with `SLACK_MCP_API_KEY`, the wrapper presents it on its upstream connection.
 
-A production version would move to **per-user delegated OAuth with token vaulting** — each real user authorizes the wrapper via Slack's OAuth flow, tokens are stored encrypted, and the correct token is selected per session. Not implemented here; noted as the production-path difference.
+Current scope uses a **single service-account bot token** in the vendor server: adequate for a single-workspace demo, but it does not attribute actions to individual end users. The production path is per-user delegated OAuth — which is exactly the model Slack's official MCP server imposes (next section).
+
+## The official Slack MCP server (the production upstream)
+
+Slack ships an official remote MCP server. This wrapper is designed so that pointing at it instead of the local vendor is a configuration change in `upstream.py`/`.env`, not a rewrite. What it requires, per [Slack's docs](https://docs.slack.dev/ai/slack-mcp-server/):
+
+- **Endpoint:** `https://mcp.slack.com/mcp` — JSON-RPC 2.0 over **streamable HTTP only** (no SSE, no dynamic client registration).
+- **Auth:** confidential OAuth 2.0 with the app's `client_id`/`client_secret`; user tokens via `https://slack.com/oauth/v2_user/authorize` + `https://slack.com/api/oauth.v2.user.access`. Scopes vary per tool.
+- **App requirements:** only **directory-published or internal** Slack apps may connect; workspace admins must approve the integration; IP allowlists may apply.
+- **Tools:** search (messages/files/users/channels/emoji), read/send messages, threads, reactions, channel creation, member lists, files, canvases, user info.
+- **Rate limits:** per-tool, roughly Tier 2 (~20/min) to Tier 4 (~100/min).
+
+Those prerequisites (published app + admin approval + OAuth client) are why local development uses the open-source [`korotovsky/slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server), which needs only a bot token. The swap also implies renaming entries in the passthrough allowlist, since the official server's tool names differ from the vendor's — that's the one file (`overrides.py`) expected to change.
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.11+
-- A Slack workspace you control, with a bot token (`xoxb-...`) and a few basic scopes (`channels:history`, `channels:read`, `users:read`)
-- An Anthropic API key (for `slack_thread_digest`)
-- [`korotovsky/slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server) available to run locally
+- A Slack workspace you control, with a bot token (`xoxb-...`) and basic scopes (`channels:history`, `channels:read`, `users:read`)
+- [`korotovsky/slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server) available to run locally (Go, or its released binaries/Docker image)
+- An MCP client that supports **sampling** for `slack_thread_digest` (MCP Inspector does; the other tools work regardless)
 
 ### 1. Run the vendor Slack MCP server
 
 ```bash
-git clone https://github.com/korotovsky/slack-mcp-server.git
-cd slack-mcp-server
 export SLACK_MCP_XOXB_TOKEN=xoxb-your-bot-token
-go run mcp/mcp-server.go --transport sse --port 8090
+slack-mcp-server --transport sse   # serves on 127.0.0.1:13080 by default
 ```
 
 ### 2. Configure the wrapper
 
 ```bash
-git clone https://github.com/<your-username>/slack-mcp-wrapper.git
-cd slack-mcp-wrapper
 cp .env.example .env
 ```
 
 `.env`:
 ```
-VENDOR_SLACK_MCP_URL=http://localhost:8090
-ANTHROPIC_API_KEY=your-key-here
+VENDOR_SLACK_MCP_URL=http://127.0.0.1:13080/sse
+WRAPPER_HOST=127.0.0.1
 WRAPPER_PORT=8080
+# VENDOR_API_KEY=only-if-vendor-started-with-SLACK_MCP_API_KEY
 ```
 
 ### 3. Run the wrapper
 
 ```bash
-pip install -r requirements.txt
-python server.py
+pip install -e .
+python -m slack_mcp_wrapper.server
 ```
 
 ### 4. Point an AI client at the wrapper
@@ -130,8 +154,7 @@ python server.py
 {
   "mcpServers": {
     "slack-wrapper": {
-      "url": "http://localhost:8080/mcp",
-      "transport": "sse"
+      "url": "http://127.0.0.1:8080/mcp"
     }
   }
 }
@@ -139,45 +162,49 @@ python server.py
 
 ## Testing
 
-- **Manual inspection:** run the wrapper, then connect with [MCP Inspector](https://github.com/modelcontextprotocol/inspector) to call `tools/list` and confirm both vendor and composite tools appear, then exercise `tools/call` on each.
-- **Contract check against the vendor:** before relying on a demo, re-run `tools/list` against the vendor server directly and diff the tool names/schemas your dispatcher depends on — vendor servers can rename or change tools without notice.
+- **Live inspection:** run vendor + wrapper, connect with [MCP Inspector](https://github.com/modelcontextprotocol/inspector), confirm `tools/list` shows the 4 passthrough + 2 composite tools, exercise each `tools/call` against a real workspace. Inspector's sampling support exercises `slack_thread_digest` end to end.
+- **Unit tests:** `pytest` covers the pure metric computation behind `slack_channel_health_report` — no network, no mocks needed.
+- **Contract check against the vendor:** re-run `tools/list` against the vendor server directly and diff the tool names/schemas the allowlist depends on — vendor servers can rename or change tools without notice.
 
 ## Project structure
 
 ```
 slack-mcp-wrapper/
-├── server.py              # wrapper MCP server entrypoint
-├── registry.py            # merges vendor + local tool lists for tools/list
-├── dispatch.py            # routes tools/call to vendor or local handler
-├── tools/
-│   ├── health_report.py   # slack_channel_health_report
-│   └── thread_digest.py   # slack_thread_digest
-├── vendor_client.py       # MCP client connection to the vendor server
+├── pyproject.toml
 ├── .env.example
-└── requirements.txt
+├── src/slack_mcp_wrapper/
+│   ├── config.py            # env-driven settings (vendor URL, host/port)
+│   ├── upstream.py          # single integration point: proxy provider + internal client, one config
+│   ├── overrides.py         # namespace, description overrides, passthrough allowlist (data, not logic)
+│   ├── server.py            # assembles the FastMCP server; entrypoint
+│   └── tools/
+│       ├── health_report.py # slack_channel_health_report
+│       └── thread_digest.py # slack_thread_digest (MCP sampling)
+└── tests/
+    └── test_health_metrics.py
 ```
 
 ## Design decisions and known tradeoffs
 
-- **Wrapper, not gateway.** This project intentionally does not do multi-backend routing or load balancing across replicas — that's a separate, larger project (see Roadmap). This scope is one vendor, one wrapper.
+- **Wrapper, not gateway.** No multi-backend routing or load balancing — that's a separate, larger project (see Roadmap). One vendor, one wrapper.
 - **Single point of failure on the vendor.** If the vendor Slack MCP server is down, every tool in this wrapper is unavailable, including the composite ones. No fallback is implemented.
-- **Rate limits compound.** `slack_channel_health_report` makes two vendor calls per invocation; heavy use will hit Slack's Web API rate limits faster than a single passthrough call would.
-- **Vendor drift risk.** The vendor server is a dependency outside this project's control. `vendor_client.py` is kept as a single, isolated integration point specifically so a vendor API/schema change — or swapping to Slack's official `mcp.slack.com` server — only requires changes in one file.
+- **Rate limits compound.** Composite tools make vendor calls per invocation; heavy use hits Slack's Web API rate limits faster than single passthrough calls — and against the official server, its per-tool tiers apply.
+- **Sampling requires client support.** `slack_thread_digest` depends on the client implementing MCP sampling. Clients that don't get a degraded (but still useful) response. This was chosen over a server-side LLM key deliberately: the client's model is already paid for, already in context, and the wrapper stays credential-free.
+- **Vendor drift risk.** The vendor server is outside this project's control. `upstream.py` + `overrides.py` are the only files that know vendor specifics, so a vendor schema change — or the swap to `mcp.slack.com` — is contained.
 
 ## Roadmap
 
-- [ ] `slack_triage_and_notify` — cross-system composite tool (Slack → Notion)
+- [ ] `slack_triage_and_notify` — cross-system composite tool (Slack → Notion); deferred to keep scope to a single vendor
 - [ ] Per-user OAuth token vaulting instead of a single service-account token
-- [ ] Extend from a single-vendor wrapper to a multi-vendor gateway (aggregation + namespacing + optional load balancing across replicas of one backend)
-- [ ] Swap the vendor connection to Slack's official remote MCP server (`mcp.slack.com`) as an alternative backend
+- [ ] Extend from a single-vendor wrapper to a multi-vendor gateway (aggregation + namespacing + optional load balancing)
+- [ ] Swap the upstream to Slack's official remote MCP server (`mcp.slack.com`)
 
 ## Related projects and prior art
 
 - [`korotovsky/slack-mcp-server`](https://github.com/korotovsky/slack-mcp-server) — the vendor server wrapped by this project
-- [Slack's official MCP server](https://docs.slack.dev/ai/slack-mcp-server/) — the production alternative to the open-source vendor server used here
-- [`mcp-proxy.dev`](https://mcp-proxy.dev/) — MCP Proxy Wrapper; documents the Decorator-pattern architecture this project follows
+- [Slack's official MCP server](https://docs.slack.dev/ai/slack-mcp-server/) — the production upstream this wrapper is config-swap ready for
+- [FastMCP 3.x](https://gofastmcp.com/) — providers, transforms, proxying, sampling; the framework doing the heavy lifting here
 - [`metatool-ai/metamcp`](https://github.com/metatool-ai/metamcp) — reference for the multi-backend gateway pattern this project may grow into
-- [FastMCP](https://gofastmcp.com/) — `Provider`/`Tool.from_tool()` primitives used for proxying and tool transformation
 
 ## License
 
