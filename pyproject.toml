@@ -1,0 +1,31 @@
+[project]
+name = "slack-mcp-wrapper"
+version = "0.1.0"
+description = "MCP server that wraps a vendor Slack MCP server and adds composite orchestration tools (Decorator pattern for MCP)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "fastmcp>=3.0",
+    "pydantic-settings>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[project.scripts]
+slack-mcp-wrapper = "slack_mcp_wrapper.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
