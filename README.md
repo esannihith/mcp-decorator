@@ -6,7 +6,7 @@ This is **not** a gateway or aggregator. It doesn't route between multiple diffe
 
 Built on [FastMCP 3.x](https://gofastmcp.com/), whose provider/transform architecture does the proxying natively — this project contains **no hand-written tool registry or call dispatcher**.
 
-> **Status:** work in progress. Built in phases; each phase is a commit checkpoint.
+> **Status:** implemented and verified against an in-memory stand-in vendor (wiring, transforms, allowlist, both composite tools, sampling + degraded path). Live verification against a real Slack workspace is pending — follow [Testing](#testing) with the vendor server running.
 
 ## Why this exists
 
@@ -187,7 +187,7 @@ slack-mcp-wrapper/
 ## Design decisions and known tradeoffs
 
 - **Wrapper, not gateway.** No multi-backend routing or load balancing — that's a separate, larger project (see Roadmap). One vendor, one wrapper.
-- **Single point of failure on the vendor.** If the vendor Slack MCP server is down, every tool in this wrapper is unavailable, including the composite ones. No fallback is implemented.
+- **Single point of failure on the vendor.** If the vendor Slack MCP server is down, passthrough tools disappear from `tools/list` and composite tools fail at call time (they still list, since they're local). The wrapper itself boots and serves regardless — the vendor connection is lazy — but no fallback data path exists.
 - **Rate limits compound.** Composite tools make vendor calls per invocation; heavy use hits Slack's Web API rate limits faster than single passthrough calls — and against the official server, its per-tool tiers apply.
 - **Sampling requires client support.** `slack_thread_digest` depends on the client implementing MCP sampling. Clients that don't get a degraded (but still useful) response. This was chosen over a server-side LLM key deliberately: the client's model is already paid for, already in context, and the wrapper stays credential-free.
 - **Vendor drift risk.** The vendor server is outside this project's control. `upstream.py` + `overrides.py` are the only files that know vendor specifics, so a vendor schema change — or the swap to `mcp.slack.com` — is contained.
