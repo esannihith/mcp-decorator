@@ -54,7 +54,12 @@ class Vendor:
         return create_proxy(self.client(), name="slack-vendor")
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> CallToolResult:
-        """One vendor tool call by *raw* vendor tool name (no namespace)."""
+        """One vendor tool call by *raw* vendor tool name (no namespace).
+
+        Vendor-side failures raise ToolError carrying the vendor's own
+        message (e.g. "channel_not_found") — callers never receive an
+        is_error result to parse.
+        """
         async with self.client() as client:
             return await client.call_tool(name, args)
 

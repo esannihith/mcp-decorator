@@ -14,6 +14,7 @@ from typing import Any
 
 from fastmcp import Context, FastMCP
 
+from slack_mcp_wrapper.tools.health_report import parse_ts
 from slack_mcp_wrapper.upstream import Vendor, extract_messages
 
 # Keeps the sampling prompt bounded on very long threads; the tail of a thread
@@ -29,7 +30,7 @@ SYSTEM_PROMPT = (
 
 def build_transcript(messages: list[dict[str, Any]]) -> str:
     """Flatten thread messages to 'user: text' lines, oldest first."""
-    ordered = sorted(messages, key=lambda m: float(m.get("ts", 0)))
+    ordered = sorted(messages, key=lambda m: parse_ts(m.get("ts")) or 0.0)
     lines = [
         f"{m.get('user', 'unknown')}: {m.get('text', '')}".strip()
         for m in ordered

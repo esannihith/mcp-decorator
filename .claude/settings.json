@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -m pytest tests/ -q)",
+      "PowerShell(python -m slack_mcp_wrapper.server)",
+      "PowerShell(Start-Sleep -Seconds 4; $env:PYTHONIOENCODING = \"utf-8\"; python \"C:\\\\Users\\\\esann\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-esann-Desktop-mcp\\\\a6d9cf25-ecfe-4697-a0e9-130ec7a47965\\\\scratchpad\\\\recheck.py\")",
+      "PowerShell(git add -A)"
+    ]
+  }
+}

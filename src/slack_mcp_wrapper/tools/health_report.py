@@ -16,30 +16,40 @@ from fastmcp import FastMCP
 from slack_mcp_wrapper.upstream import Vendor, extract_messages
 
 
+def parse_ts(value: Any) -> float | None:
+    """Slack timestamp as float, or None for missing/malformed values."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def compute_channel_metrics(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Activity metrics over Slack message dicts (need ``user`` and ``ts``).
 
     Messages missing an author (channel join notices, some bot events) are
-    counted toward volume/timing but excluded from per-user rankings.
+    counted toward volume/timing but excluded from per-user rankings, and
+    malformed timestamps are skipped rather than crashing the report.
     """
-    timestamps = sorted(float(m["ts"]) for m in messages if m.get("ts"))
+    timestamps = sorted(ts for m in messages if (ts := parse_ts(m.get("ts"))) is not None)
     per_user = Counter(str(m["user"]) for m in messages if m.get("user"))
 
     gaps = [b - a for a, b in zip(timestamps, timestamps[1:])]
     ranked = per_user.most_common()
+    top = ranked[0][1] if ranked else 0
+    bottom = ranked[-1][1] if ranked else 0
 
     return {
         "message_count": len(messages),
         "participant_count": len(per_user),
         "messages_per_user": dict(ranked),
-        "most_active": (
-            [{"user": u, "messages": c} for u, c in ranked if c == ranked[0][1]]
-            if ranked
-            else []
-        ),
+        "most_active": [{"user": u, "messages": c} for u, c in ranked if c == top],
+        # Only meaningful when someone is actually behind the pack; when all
+        # participants tie (or there's one poster), an empty list beats
+        # repeating most_active.
         "least_active": (
-            [{"user": u, "messages": c} for u, c in ranked if c == ranked[-1][1]]
-            if ranked
+            [{"user": u, "messages": c} for u, c in ranked if c == bottom]
+            if bottom < top
             else []
         ),
         "avg_response_gap_seconds": round(sum(gaps) / len(gaps), 1) if gaps else None,

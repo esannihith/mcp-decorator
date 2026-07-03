@@ -41,7 +41,9 @@ def build_server(settings: Settings, vendor: Vendor | None = None) -> FastMCP:
     tools.register_all(mcp, vendor)
 
     # Allowlist, not blocklist: vendor tools we didn't curate stay hidden even
-    # if the vendor adds or renames tools later.
+    # if the vendor adds or renames tools later. Verified live: only=True also
+    # hides the vendor's resources/prompts, so the wrapper's whole surface is
+    # exactly these tools — intended, as this project's scope is tools-only.
     mcp.enable(names=allowed_tools(), only=True, components={"tool"})
 
     return mcp

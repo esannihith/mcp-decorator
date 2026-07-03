@@ -47,6 +47,30 @@ def test_single_message():
     assert report["message_count"] == 1
     assert report["avg_response_gap_seconds"] is None
     assert report["span_seconds"] == 0
+    # A lone poster is "most active" but nobody is meaningfully least active.
+    assert report["most_active"] == [{"user": "alice", "messages": 1}]
+    assert report["least_active"] == []
+
+
+def test_all_tied_participants_have_no_least_active():
+    report = compute_channel_metrics([msg("alice", 1000.0), msg("bob", 1060.0)])
+    assert {e["user"] for e in report["most_active"]} == {"alice", "bob"}
+    assert report["least_active"] == []
+
+
+def test_malformed_timestamps_do_not_crash_metrics():
+    messages = [
+        msg("alice", 1000.0),
+        {"user": "bob", "ts": "not-a-timestamp", "text": "hi"},
+        {"user": "carol", "text": "no ts at all"},
+        msg("alice", 1120.0),
+    ]
+    report = compute_channel_metrics(messages)
+    assert report["message_count"] == 4
+    assert report["participant_count"] == 3
+    # Timing metrics use only the two valid timestamps.
+    assert report["avg_response_gap_seconds"] == 120.0
+    assert report["span_seconds"] == 120.0
 
 
 def test_authorless_messages_count_for_volume_not_ranking():
